@@ -399,6 +399,13 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     if axis in how.tiled_axes:
       tiled_axes_offset += 1  # reduce the tile_size rather than num_tiles.
     reduce_axes.append(axis + tiled_axes_offset)
+  
+  for axis, size in how.tiled_axes.items():
+    dim = array.shape[axis]
+    r = dim % size
+    pw = [(0, 0)] * array.ndim
+    pw[axis] = (0, size - r)
+    array = jnp.pad(array, pw, constant_values=0)
 
   # The returned calibration values should have the same shape as the scale.
   shape = get_scale_shape(array.shape, how)
