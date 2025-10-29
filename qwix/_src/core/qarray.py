@@ -57,6 +57,11 @@ class QArray:
   qtype: jax.typing.DTypeLike = flax.struct.field(
       pytree_node=False, default=None
   )
+  # Optional metadata to carry true tiling information used during calibration
+  # and quantization. Keys are axis indices, values are integer tile sizes.
+  tiled_axes_meta: Mapping[int, int] = flax.struct.field(
+    pytree_node=False, default_factory=dict
+  )
 
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
@@ -350,11 +355,39 @@ def get_tiled_axes(array: QArray) -> dict[int, int]:
   Returns:
     A dict from tiled axis to tile size.
   """
+  # Prefer explicitly stored metadata when available because padding during
+  # calibration may make j//k smaller than the true tile size.
+  if getattr(array, 'tiled_axes_meta', None):
+    return dict(array.tiled_axes_meta)
   tiled_axes = {}
   for i, (j, k) in enumerate(zip(array.qvalue.shape, array.scale.shape)):
     if j != k and k != 1:
       tiled_axes[i] = j // k
   return tiled_axes
+
+
+def resolve_tiled_axes(
+    array_shape: ShapeT, tiled_axes: Mapping[int, int | float]
+) -> dict[int, int]:
+  """Resolves possibly fractional tile specs to concrete integer sizes.
+
+  Converts entries like {axis: 1/num_tiles} into integer tile sizes using
+  the provided array_shape. Leaves integer sizes unchanged.
+
+  Args:
+    array_shape: Shape of the original (un-padded) array being quantized.
+    tiled_axes: Mapping from axis to tile size or fraction.
+
+  Returns:
+    A mapping from axis to integer tile size.
+  """
+  resolved: dict[int, int] = {}
+  for axis, size in tiled_axes.items():
+    dim = array_shape[axis]
+    if isinstance(size, float):
+      size = round(dim * size)
+    resolved[axis] = int(size)
+  return resolved
 
 
 def call_with_generic_broadcast(
@@ -489,6 +522,7 @@ def quantize_with_scale_zero_point(
     scale: jax.Array,
     zero_point: jax.Array | None,
     noise_fn: numerics.NoiseFn | None = None,
+  tiled_axes_meta: Mapping[int, int] | None = None,
 ) -> QArray:
   """Quantizes an array with the given scale and zero_point.
 
@@ -520,7 +554,13 @@ def quantize_with_scale_zero_point(
         jnp.add, qvalue, zero_point.astype(qvalue.dtype)
     )
   qvalue = numerics.convert_to(qvalue, qtype, noise_fn)
-  return QArray(qvalue, scale, zero_point, qtype)
+  return QArray(
+      qvalue,
+      scale,
+      zero_point,
+      qtype,
+      tiled_axes_meta=dict(tiled_axes_meta) if tiled_axes_meta else {},
+  )
 
 
 def quantize(
@@ -531,7 +571,12 @@ def quantize(
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
   return quantize_with_scale_zero_point(
-      array, how.qtype, scale, zero_point, how.noise_fn
+    array,
+    how.qtype,
+    scale,
+    zero_point,
+    how.noise_fn,
+    tiled_axes_meta=resolve_tiled_axes(array.shape, how.tiled_axes),
   )
 
 

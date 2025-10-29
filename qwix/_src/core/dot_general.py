@@ -13,7 +13,7 @@
 # limitations under the License.
 """Quantized jax.lax.dot_general with subchannel support."""
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Sequence, Mapping
 import itertools
 import jax
 from jax import numpy as jnp
@@ -122,6 +122,27 @@ def _broadcast_axes(
   return jnp.broadcast_to(array, target_shape)
 
 
+def _pad_to_tile(
+    array: jax.Array, tiled_axes: Mapping[int, int]
+) -> jax.Array:
+  """Pads array along tiled axes so each is a multiple of tile size.
+
+  This mirrors the padding performed in qarray.calibrate so that values align
+  with the number of tiles implied by the scale/zero_point shapes.
+  """
+  if not tiled_axes:
+    return array
+  pad_width = [(0, 0)] * array.ndim
+  for axis, tile in tiled_axes.items():
+    size = array.shape[axis]
+    rem = size % tile
+    if rem:
+      pad_width[axis] = (0, tile - rem)
+  if all(p == (0, 0) for p in pad_width):
+    return array
+  return jnp.pad(array, pad_width, constant_values=0)
+
+
 def _fast_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -172,6 +193,10 @@ def _fast_dot_general(
     if lhs_tile_size or rhs_tile_size:
       lhs_tiled_ca[l] = lhs_tile_size or rhs_tile_size
       rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
+
+  # Pad values along tiled contracting axes to align with tile sizes.
+  lhs_value = _pad_to_tile(lhs_value, lhs_tiled_ca)
+  rhs_value = _pad_to_tile(rhs_value, rhs_tiled_ca)
 
   # Split lhs/rhs_value for tiled axes.
   lhs_value = qarray.split_axis(lhs_value, lhs_tiled_ca)
@@ -411,11 +436,22 @@ def dot_general(
     # be inefficient and we should dequantize the input first. This is critical
     # when a contracting dimension is channelwise quantized, e.g. tile_size=1.
     for axis in ca:
-      if operand.scale.shape[axis] > 1:
-        tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
-        if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
-          use_fast_dot_general = False
-          break
+      # Prefer true tiles from metadata; fall back to shape-based checks.
+      true_tiles = qarray.get_tiled_axes(operand)
+      tile_size = true_tiles.get(axis)
+      if tile_size is None:
+        # Channelwise case: per-channel scales imply tile_size == 1.
+        if (
+            operand.scale.shape[axis] > 1
+            and operand.scale.shape[axis] == operand.qvalue.shape[axis]
+        ):
+          tile_size = 1
+        elif operand.scale.shape[axis] > 1:
+          # Legacy fallback (may underestimate if scales were padded).
+          tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
+      if tile_size is not None and tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
+        use_fast_dot_general = False
+        break
 
   if use_fast_dot_general:
     return _fast_dot_general(
