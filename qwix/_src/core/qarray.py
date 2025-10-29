@@ -366,30 +366,6 @@ def get_tiled_axes(array: QArray) -> dict[int, int]:
   return tiled_axes
 
 
-def resolve_tiled_axes(
-    array_shape: ShapeT, tiled_axes: Mapping[int, int | float]
-) -> dict[int, int]:
-  """Resolves possibly fractional tile specs to concrete integer sizes.
-
-  Converts entries like {axis: 1/num_tiles} into integer tile sizes using
-  the provided array_shape. Leaves integer sizes unchanged.
-
-  Args:
-    array_shape: Shape of the original (un-padded) array being quantized.
-    tiled_axes: Mapping from axis to tile size or fraction.
-
-  Returns:
-    A mapping from axis to integer tile size.
-  """
-  resolved: dict[int, int] = {}
-  for axis, size in tiled_axes.items():
-    dim = array_shape[axis]
-    if isinstance(size, float):
-      size = round(dim * size)
-    resolved[axis] = int(size)
-  return resolved
-
-
 def call_with_generic_broadcast(
     op: Callable[[jax.Array, jax.Array], jax.Array], x: jax.Array, y: jax.Array
 ):
@@ -522,7 +498,7 @@ def quantize_with_scale_zero_point(
     scale: jax.Array,
     zero_point: jax.Array | None,
     noise_fn: numerics.NoiseFn | None = None,
-  tiled_axes_meta: Mapping[int, int] | None = None,
+    tiled_axes_meta: Mapping[int, int] | None = None,
 ) -> QArray:
   """Quantizes an array with the given scale and zero_point.
 
@@ -547,6 +523,13 @@ def quantize_with_scale_zero_point(
   # Ensure that the scale has the same dtype as the fp array, because
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
+
+  for axis, size in tiled_axes_meta.items():
+    dim = array.shape[axis]
+    r = dim % size
+    pw = [(0, 0)] * array.ndim
+    pw[axis] = (0, size - r)
+    array = jnp.pad(array, pw, constant_values=0)
 
   qvalue = call_with_generic_broadcast(jnp.divide, array, scale)
   if zero_point is not None:
@@ -576,7 +559,7 @@ def quantize(
     scale,
     zero_point,
     how.noise_fn,
-    tiled_axes_meta=resolve_tiled_axes(array.shape, how.tiled_axes),
+    tiled_axes_meta=how.tiled_axes,
   )
 
 
