@@ -121,28 +121,6 @@ def _broadcast_axes(
     target_shape[a] = shape[a]
   return jnp.broadcast_to(array, target_shape)
 
-
-def _pad_to_tile(
-    array: jax.Array, tiled_axes: Mapping[int, int]
-) -> jax.Array:
-  """Pads array along tiled axes so each is a multiple of tile size.
-
-  This mirrors the padding performed in qarray.calibrate so that values align
-  with the number of tiles implied by the scale/zero_point shapes.
-  """
-  if not tiled_axes:
-    return array
-  pad_width = [(0, 0)] * array.ndim
-  for axis, tile in tiled_axes.items():
-    size = array.shape[axis]
-    rem = size % tile
-    if rem:
-      pad_width[axis] = (0, tile - rem)
-  if all(p == (0, 0) for p in pad_width):
-    return array
-  return jnp.pad(array, pad_width, constant_values=0)
-
-
 def _fast_dot_general(
     lhs: qarray.MaybeQArray,
     rhs: qarray.MaybeQArray,
@@ -195,8 +173,8 @@ def _fast_dot_general(
       rhs_tiled_ca[r] = lhs_tile_size or rhs_tile_size
 
   # Pad values along tiled contracting axes to align with tile sizes.
-  lhs_value = _pad_to_tile(lhs_value, lhs_tiled_ca)
-  rhs_value = _pad_to_tile(rhs_value, rhs_tiled_ca)
+  lhs_value = qarray.pad_to_tile(lhs_value, lhs_tiled_ca)
+  rhs_value = qarray.pad_to_tile(rhs_value, rhs_tiled_ca)
 
   # Split lhs/rhs_value for tiled axes.
   lhs_value = qarray.split_axis(lhs_value, lhs_tiled_ca)

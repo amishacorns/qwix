@@ -345,6 +345,33 @@ def split_axis(
       new_shape.append(dim)
   return array.reshape(new_shape)
 
+def pad_to_tile(
+    array: jax.Array, tiled_axes: Mapping[int, int | float]
+) -> jax.Array:
+  """Pads array along tiled axes so each dimension is a multiple of tile size.
+  
+  Only pads when dimension doesn't evenly divide by tile size.
+  
+  Args:
+    array: The array to pad.
+    tiled_axes: Mapping from axis index to tile size.
+    
+  Returns:
+    The padded array.
+  """
+  if not tiled_axes:
+    return array
+  pad_width = [(0, 0)] * array.ndim
+  for axis, tile_size in tiled_axes.items():
+    if isinstance(tile_size, float):
+      tile_size = round(array.shape[axis] * tile_size)
+    dim = array.shape[axis]
+    remainder = dim % tile_size
+    if remainder > 0:
+      pad_width[axis] = (0, tile_size - remainder)
+  if all(p == (0, 0) for p in pad_width):
+    return array
+  return jnp.pad(array, pad_width, constant_values=0)
 
 def get_tiled_axes(array: QArray) -> dict[int, int]:
   """Infers the tiled axes from a QArray.
@@ -409,13 +436,8 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
       tiled_axes_offset += 1  # reduce the tile_size rather than num_tiles.
     reduce_axes.append(axis + tiled_axes_offset)
   
-  for axis, size in how.tiled_axes.items():
-    dim = array.shape[axis]
-    r = dim % size
-    pw = [(0, 0)] * array.ndim
-    pw[axis] = (0, size - r)
-    array = jnp.pad(array, pw, constant_values=0)
-
+  # Pad the array to be divisible by tile sizes.
+  array = pad_to_tile(array, how.tiled_axes)
   # The returned calibration values should have the same shape as the scale.
   shape = get_scale_shape(array.shape, how)
   array = split_axis(array, how.tiled_axes)
@@ -523,14 +545,9 @@ def quantize_with_scale_zero_point(
   # Ensure that the scale has the same dtype as the fp array, because
   # dequantize() uses the scale dtype to reconstruct the original array.
   scale = scale.astype(array.dtype)
-
-  for axis, size in tiled_axes_meta.items():
-    dim = array.shape[axis]
-    r = dim % size
-    pw = [(0, 0)] * array.ndim
-    pw[axis] = (0, size - r)
-    array = jnp.pad(array, pw, constant_values=0)
-
+  
+  # Pad the array to be divisible by tile sizes.
+  array = pad_to_tile(array, tiled_axes_meta)
   qvalue = call_with_generic_broadcast(jnp.divide, array, scale)
   if zero_point is not None:
     qvalue = call_with_generic_broadcast(
