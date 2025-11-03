@@ -205,40 +205,17 @@ def conv_general_dilated(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     out_sharding=None,
 ) -> jax.Array:
-  """Dispatches to fast or slow conv_general_dilated depending on the inputs."""
-  use_fast_path = True
-
-  for x in (lhs, rhs):
-    if isinstance(x, jax.Array) and numerics.should_quantize(x.dtype):
-      use_fast_path = False
-      break
-
-  if use_fast_path:
-    return _fast_conv_general_dilated(
-        lhs,
-        rhs,
-        window_strides,
-        padding,
-        lhs_dilation,
-        rhs_dilation,
-        dimension_numbers,
-        feature_group_count,
-        batch_group_count,
-        preferred_element_type,
-        out_sharding,
-    )
-  else:
-    return _slow_conv_general_dilated(
-        lhs,
-        rhs,
-        window_strides,
-        padding,
-        lhs_dilation,
-        rhs_dilation,
-        dimension_numbers,
-        feature_group_count,
-        batch_group_count,
-        precision,
-        preferred_element_type,
-        out_sharding,
-    )
+  """ALWAYS use fast conv_general_dilated path."""
+  return _fast_conv_general_dilated(
+      lhs,
+      rhs,
+      window_strides,
+      padding,
+      lhs_dilation,
+      rhs_dilation,
+      dimension_numbers,
+      feature_group_count,
+      batch_group_count,
+      preferred_element_type,
+      out_sharding,
+  )

@@ -382,56 +382,13 @@ def dot_general(
   Returns:
     a floating-point jax.Array.
   """
-  # We need to choose between slow_dot_general, which dequantizes first and
-  # then computes in floating-point types, and fast_dot_general, which
-  # computes in quantized types first and then dequantize.
-  use_fast_dot_general = True
-  for operand, ca in zip((lhs, rhs), dimension_numbers[0]):
-    if not isinstance(operand, qarray.QArray):
-      if numerics.should_quantize(operand.dtype):
-        # Always dequantize on inputs if any of the operands is in bf16/fp32,
-        # because XLA is able to fuse the dequantize and the matmul. The slow
-        # path is usually not slower than the fast path, since both use fp
-        # matmul, and will be significantly faster when subchannel or zero_point
-        # is used.
-        use_fast_dot_general = False
-        break
-      # For raw arrays in lower precision, e.g. fp8, int4, bool, using fast path
-      # may be beneficial.
-      continue
 
-    qarray.validate_qarray(operand)
-
-    # qtypes like nf4 cannot be dequantized on output.
-    if not numerics.can_dequant_on_output(operand.qtype):
-      use_fast_dot_general = False
-      break
-
-    # If a contracting dimension is tiled too small, tiled dot general will
-    # be inefficient and we should dequantize the input first. This is critical
-    # when a contracting dimension is channelwise quantized, e.g. tile_size=1.
-    for axis in ca:
-      if operand.scale.shape[axis] > 1:
-        tile_size = operand.qvalue.shape[axis] // operand.scale.shape[axis]
-        if tile_size < MIN_TILE_SIZE_TO_DEQUANT_ON_OUTPUT:
-          use_fast_dot_general = False
-          break
-
-  if use_fast_dot_general:
-    return _fast_dot_general(
-        lhs,
-        rhs,
-        dimension_numbers,
-        precision=precision,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
-    )
-  else:
-    return _slow_dot_general(
-        lhs,
-        rhs,
-        dimension_numbers,
-        precision=precision,
-        preferred_element_type=preferred_element_type,
-        **kwargs,
-    )
+  # ALWAYS use fast quantized path
+  return _fast_dot_general(
+      lhs,
+      rhs,
+      dimension_numbers,
+      precision=precision,
+      preferred_element_type=preferred_element_type,
+      **kwargs,
+  )

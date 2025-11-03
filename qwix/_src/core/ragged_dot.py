@@ -229,43 +229,16 @@ def ragged_dot_general(
     preferred_element_type: jax.typing.DTypeLike | None = None,
     group_offset: jax.Array | None = None,
 ) -> jax.Array:
-  """Quantized jax.lax.ragged_dot_general."""
-  use_fast_path = True
-  for operand in (lhs, rhs):
-    if isinstance(operand, qarray.QArray):
-      if operand.zero_point is not None:
-        use_fast_path = False
-        break
-    else:
-      if numerics.should_quantize(operand.dtype):
-        # Always dequantize on inputs if any of the operands is in bf16/fp32,
-        # because XLA is able to fuse the dequantize and the matmul. The slow
-        # path is usually not slower than the fast path, since both use fp
-        # matmul, and will be significantly faster when subchannel or zero_point
-        # is used.
-        use_fast_path = False
-        break
-
-  if use_fast_path:
-    return _fast_ragged_dot_general(
-        lhs,
-        rhs,
-        group_sizes,
-        dimension_numbers,
-        precision=precision,
-        preferred_element_type=preferred_element_type,
-        group_offset=group_offset,
-    )
-  else:
-    return _slow_ragged_dot_general(
-        lhs,
-        rhs,
-        group_sizes,
-        dimension_numbers,
-        precision=precision,
-        preferred_element_type=preferred_element_type,
-        group_offset=group_offset,
-    )
+  """Quantized jax.lax.ragged_dot_general - ALWAYS use fast path."""
+  return _fast_ragged_dot_general(
+      lhs,
+      rhs,
+      group_sizes,
+      dimension_numbers,
+      precision=precision,
+      preferred_element_type=preferred_element_type,
+      group_offset=group_offset,
+  )
 
 
 def ragged_dot(
