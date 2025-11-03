@@ -57,6 +57,9 @@ class QArray:
   qtype: jax.typing.DTypeLike = flax.struct.field(
       pytree_node=False, default=None
   )
+  # Optional: for MSE calibration, the chosen multiplier m* 
+  # (so that chosen_scale = m* * absmax_base / qmax). Same shape as `scale`.
+  mse_multiplier: jax.Array | None = None
 
   # Array-like methods.
   shape = property(lambda self: self.qvalue.shape)
@@ -422,6 +425,62 @@ def calibrate(array: jax.Array, how: HowToQuantize) -> dict[str, jax.Array]:
     if args:  # args[0] is the scale factor.
       absmax = absmax * args[0]
     return {'absmax': absmax.reshape(shape)}
+  elif method == 'mse':
+    # Grid search around absmax to minimize per-subchannel MSE.
+    # Supported args:
+    #   - (none): defaults to start=0.5, end=1.0, steps=21
+    #   - (start, steps): end is fixed at 1.0 (ensure absmax included)
+    #   - (start, end, steps): full control, legacy form
+    if len(args) not in (0, 2, 3):
+      raise ValueError(
+          'MSE calibration expects 0, 2 or 3 args. '
+          'Forms: "mse" | "mse,<start>,<steps>" (end fixed at 1.0) | '
+          '"mse,<start>,<end>,<steps>"'
+      )
+    if len(args) == 0:
+      start_mult, end_mult, steps_f = 0.5, 1.0, 21
+    elif len(args) == 2:
+      start_mult, steps_f = args
+      end_mult = 1.0
+    else:
+      start_mult, end_mult, steps_f = args
+    steps = int(steps_f)
+    if steps <= 0:
+      raise ValueError('steps must be a positive integer for mse calibration.')
+
+    # Base absmax per subchannel (with keepdims to match broadcasting shape).
+    base_absmax = jnp.max(jnp.abs(array), axis=reduce_axes, keepdims=True)
+    # Avoid zeros to keep scale well-defined.
+    base_absmax = jnp.where(base_absmax == 0, jnp.finfo(array.dtype).eps, base_absmax)
+
+    # Prepare search multipliers.
+    m_values = jnp.linspace(start_mult, end_mult, steps)
+
+    qmax = numerics.get_symmetric_bound(how.qtype)
+    best_mse = jnp.full_like(base_absmax, jnp.inf)
+    best_absmax = base_absmax
+    best_m = jnp.ones_like(base_absmax)
+
+    # Iterate scalars to keep memory usage bounded.
+    for k in range(steps):
+      m = m_values[k]
+      cand_absmax = base_absmax * m
+      cand_scale = cand_absmax / qmax  # same broadcasting shape as base_absmax
+      # Quantize -> Dequantize with candidate scale (symmetric).
+      qvalue = call_with_generic_broadcast(jnp.divide, array, cand_scale)
+      qvalue = numerics.convert_to(qvalue, how.qtype, how.noise_fn)
+      qvalue = numerics.convert_from(qvalue, how.qtype).astype(array.dtype)
+      dequant = call_with_generic_broadcast(jnp.multiply, qvalue, cand_scale)
+      # MSE reduced over tile_size and non-scale axes.
+      mse = jnp.mean(jnp.square(array - dequant), axis=reduce_axes, keepdims=True)
+      # Select better per subchannel.
+      # Prefer higher multipliers on ties by using <= (we iterate m ascending).
+      take = mse <= best_mse
+      best_mse = jnp.where(take, mse, best_mse)
+      best_absmax = jnp.where(take, cand_absmax, best_absmax)
+      best_m = jnp.where(take, jnp.full_like(best_m, m), best_m)
+
+    return {'absmax': best_absmax.reshape(shape), 'multiplier': best_m.reshape(shape)}
   elif method == 'rms':
     rms = jnp.sqrt(jnp.mean(jnp.square(array), axis=reduce_axes, keepdims=True))
     if not args:
@@ -482,6 +541,7 @@ def quantize_with_scale_zero_point(
     scale: jax.Array,
     zero_point: jax.Array | None,
     noise_fn: numerics.NoiseFn | None = None,
+    mse_multiplier: jax.Array | None = None,
 ) -> QArray:
   """Quantizes an array with the given scale and zero_point.
 
@@ -513,7 +573,13 @@ def quantize_with_scale_zero_point(
         jnp.add, qvalue, zero_point.astype(qvalue.dtype)
     )
   qvalue = numerics.convert_to(qvalue, qtype, noise_fn)
-  return QArray(qvalue, scale, zero_point, qtype)
+  return QArray(
+      qvalue,
+      scale,
+      zero_point,
+      qtype,
+      mse_multiplier=mse_multiplier,
+  )
 
 
 def quantize(
@@ -523,8 +589,14 @@ def quantize(
   """Quantizes an array using a dynamic range."""
   calibration = calibrate(array, how)
   scale, zero_point = compute_scale_zero_point(calibration, how.qtype)
+  mse_mult = calibration.get('multiplier') if isinstance(calibration, dict) else None
   return quantize_with_scale_zero_point(
-      array, how.qtype, scale, zero_point, how.noise_fn
+    array,
+    how.qtype,
+    scale,
+    zero_point,
+    how.noise_fn,
+    mse_multiplier=mse_mult,
   )
 
 
